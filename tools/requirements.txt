@@ -1,0 +1,54 @@
+# 核心深度学习框架
+torch==1.10.0
+torchvision==0.11.0
+tensorboardX==2.5.1
+
+# 数值计算
+numpy==1.21.5
+scipy==1.7.3
+scikit-learn==1.0.2
+numba==0.55.1
+
+# 图像处理
+opencv-python==4.5.5.64
+Pillow==9.0.1
+scikit-image==0.19.2
+
+# 3D处理和可视化
+open3d==0.15.1
+trimesh==3.10.8
+mayavi==4.7.4  # 可选，需要Qt支持
+
+# 数据处理和分析
+pandas==1.4.2
+h5py==3.6.0
+tqdm==4.64.0
+
+# 可视化
+matplotlib==3.5.2
+seaborn==0.11.2
+plotly==5.8.0
+
+# 点云处理
+# pccm  # 通过setup_environment.sh安装
+# cumm  # 通过setup_environment.sh安装
+# spconv-plus  # 通过源码安装
+
+# 配置管理
+PyYAML==6.0
+easydict==1.9
+
+# 工具库
+SharedArray==3.2.1
+llvmlite==0.38.0
+pyquaternion==0.9.9
+kornia==0.6.5
+
+# 测试和开发（可选）
+pytest==7.1.2
+pytest-runner==6.0.0
+flake8==4.0.1
+black==22.3.0
+
+# 分布式训练（可选）
+# horovod==0.24.0
