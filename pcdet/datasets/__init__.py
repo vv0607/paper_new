@@ -1,3 +1,5 @@
+import logging
+
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.data import DistributedSampler as _DistributedSampler
@@ -6,19 +8,28 @@ from pcdet.utils import common_utils
 
 from .dataset import DatasetTemplate
 from .kitti.kitti_dataset import KittiDataset
-from .kitti.kitti_dataset_custom import KittiDatasetCustom
+
+# 🔥 修改这里：导入 custom 文件中的 KittiDataset 并重命名
+try:
+    from .kitti.kitti_dataset_custom import KittiDataset as KittiDatasetCustom
+except Exception as err:
+    logging.getLogger(__name__).warning(
+        'Failed to import KittiDatasetCustom (%s); falling back to KittiDataset.', err
+    )
+    KittiDatasetCustom = KittiDataset
+
 from .nuscenes.nuscenes_dataset import NuScenesDataset
+
 
 __all__ = {
     'DatasetTemplate': DatasetTemplate,
     'KittiDataset': KittiDataset,
-    'KittiDatasetCustom': KittiDatasetCustom,
+    'KittiDatasetCustom': KittiDatasetCustom,  # 现在可以正确导入了
     'NuScenesDataset': NuScenesDataset,
 }
 
 
 class DistributedSampler(_DistributedSampler):
-
     def __init__(self, dataset, num_replicas=None, rank=None, shuffle=True):
         super().__init__(dataset, num_replicas=num_replicas, rank=rank)
         self.shuffle = shuffle
