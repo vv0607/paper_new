@@ -4,117 +4,41 @@
 CLASS_NAMES: ['Car', 'Pedestrian', 'Cyclist']
 
 DATA_CONFIG:
-    _BASE_CONFIG_: cfgs/dataset_configs/kitti_dataset.yaml
+    _BASE_CONFIG_: /home/dell/data/xzh/fang/MPCF/MPCF--3d_object_detection-main/tools/cfgs/dataset_configs/kitti_dataset_custom.yaml
     
-    # 使用MPCF的伪点云数据
-    DATA_PATH: '../data/kitti_pseudo'
-    
-    # MPCF伪点云配置
+    # 仅保留基础配置中没有的配置项
     USE_PSEUDO_LABEL: True
     PSEUDO_LABEL_DIR: 'depth_pseudo_rgbseguv_twise'
-    
-    # 点云范围（MPCF默认）
-    POINT_CLOUD_RANGE: [0, -39.68, -3, 69.12, 39.68, 1]
-    
-    DATA_PROCESSOR:
-        - NAME: mask_points_and_boxes_outside_range
-          REMOVE_OUTSIDE_BOXES: True
-          
-        - NAME: shuffle_points
-          SHUFFLE_ENABLED: {
-              'train': True,
-              'test': False
-          }
-          
-        - NAME: transform_points_to_voxels
-          VOXEL_SIZE: [0.16, 0.16, 4]  # MPCF默认体素大小
-          MAX_POINTS_PER_VOXEL: 32
-          MAX_NUMBER_OF_VOXELS: {
-              'train': 16000,
-              'test': 40000
-          }
-          
-    # 数据增强（使用MPCF的伪点云GT数据库）
-    DATA_AUGMENTOR:
-        DISABLE_AUG_LIST: ['placeholder']
-        AUG_CONFIG_LIST:
-            - NAME: gt_sampling
-              USE_ROAD_PLANE: True
-              DB_INFO_PATH:
-                  - kitti_dbinfos_train_custom_seguv.pkl  # MPCF的伪点云数据库
-              PREPARE:
-                  filter_by_min_points:
-                      Car: 5
-                      Pedestrian: 5
-                      Cyclist: 5
-              SAMPLE_GROUPS:
-                  Car: 15
-                  Pedestrian: 10
-                  Cyclist: 10
-              NUM_POINT_FEATURES: 7  # [x, y, z, intensity, r, g, b]
-              DATABASE_WITH_FAKELIDAR: True
-              REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
-              LIMIT_WHOLE_SCENE: True
-              
-            - NAME: random_world_flip
-              ALONG_AXIS_LIST: ['x']
-              
-            - NAME: random_world_rotation
-              WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
-              
-            - NAME: random_world_scaling
-              WORLD_SCALE_RANGE: [0.95, 1.05]
+    CREATE_GT_DATABASE: True
+    MERGE_PSEUDO_POINTS: True      # 启用融合
+    MERGE_MODE: 'concat'           # 简单拼接模式
+    PSEUDO_POINT_FEATURES: 7       # 伪点云特征维度
+    # 删除以下重复内容：
+    # - DATA_PATH（基础配置中已有）
+    # - POINT_CLOUD_RANGE（基础配置中已有，且现在一致）
+    # - DATA_PROCESSOR（基础配置中已有）
+    # - DATA_AUGMENTOR（基础配置中已有）
 
 MODEL:
     NAME: VoxelRCNNFusion
     
     # 使用图像分支
-    USE_IMAGE_BRANCH: True
+    USE_IMAGE_BRANCH: True  # 先设为False，确保基础版本能跑通
     USE_FUSION: True
     
     # 体素特征编码器
     VFE:
         NAME: MeanVFE
+        NUM_POINT_FEATURES: 7
         
     # 3D稀疏卷积主干（使用FocalsConv）
     BACKBONE_3D:
         NAME: VoxelBackBone8xFocal
-        USE_FOCALS: True
-        FOCALS_CONFIG:
-            fuse_sum: True
-            fuse_max: True
-            focal_dynamic: True
-            kernel_threshold: 0.5
-            
-    # 图像主干网络
-    IMAGE_BACKBONE:
-        NAME: resnet50
-        PRETRAINED: True
         
-    # FPN配置
-    IMAGE_FPN:
-        IN_CHANNELS: [256, 512, 1024, 2048]
-        OUT_CHANNELS: 256
-        
-    # 融合模块配置
-    FUSION_MODULES:
-        USE_LI_FUSION: True
-        USE_CB_FUSION: False
-        FUSION_STAGES: ['x_conv3']  # 在conv3阶段融合
-        
-        LI_FUSION_CONFIG:
-            IN_CHANNELS_2D: 256  # FPN输出通道
-            OUT_CHANNELS: 64      # 输出通道
-            MID_CHANNELS: 128     # 中间层通道
-            
-        CB_FUSION_CONFIG:
-            CHANNELS: [16, 32, 64, 64]
-            OUT_CHANNELS: 64
-            
     # BEV映射
     MAP_TO_BEV:
         NAME: HeightCompression
-        NUM_BEV_FEATURES: 256
+        NUM_BEV_FEATURES: 128
         
     # 2D BEV主干
     BACKBONE_2D:
@@ -280,7 +204,7 @@ MODEL:
 
 # 优化器配置
 OPTIMIZATION:
-    BATCH_SIZE_PER_GPU: 4  # MPCF默认
+    BATCH_SIZE_PER_GPU: 4
     NUM_EPOCHS: 80
     
     OPTIMIZER: adam_onecycle
