@@ -243,6 +243,7 @@ class BaseBEVBackbone(nn.Module):
         # x = self.conv_out(x)
 
         for i in range(len(self.blocks)):
+            # print(f"DEBUG: Input shape to block {i}: {x.shape}, dtype: {x.dtype}")
             x = self.blocks[i](x)
 
             stride = int(spatial_features.shape[2] / x.shape[2])
@@ -253,6 +254,11 @@ class BaseBEVBackbone(nn.Module):
                 ups.append(x)
 
         if len(ups) > 1:
+            # x = torch.cat(ups, dim=1)
+            # 对齐空间尺寸后拼接
+            target_size = ups[0].shape[-2:]
+            ups = [torch.nn.functional.interpolate(u, size=target_size, mode='bilinear', align_corners=False) 
+                if u.shape[-2:] != target_size else u for u in ups]
             x = torch.cat(ups, dim=1)
         elif len(ups) == 1:
             x = ups[0]
