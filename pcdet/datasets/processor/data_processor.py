@@ -218,7 +218,7 @@ class DataProcessor(object):
             self.voxel_generator = VoxelGeneratorWrapper(
                 vsize_xyz=config.VOXEL_SIZE,
                 coors_range_xyz=self.point_cloud_range,
-                num_point_features=self.num_point_features,
+                num_point_features=self.num_point_features,  # 4维
                 max_num_points_per_voxel=config.MAX_POINTS_PER_VOXEL,
                 max_num_voxels=config.MAX_NUMBER_OF_VOXELS[self.mode],
             )
@@ -241,27 +241,96 @@ class DataProcessor(object):
             voxel_output = self.voxel_generator.generate(points)
             voxels, coordinates, num_points = voxel_output
 
-            if not data_dict['use_lead_xyz']:
-                voxels = voxels[..., 3:]  # remove xyz in voxels(N, 3)
+            # 🔥 关键修复：强制移除xyz，只保留intensity
+            # 输入: (N, max_points, 4) [x,y,z,intensity]
+            # 输出: (N, max_points, 1) [intensity]
+            voxels = voxels[..., 3:]  # 强制移除前3维
+            
+            print(f"[DEBUG] Original voxels shape after removing xyz: {voxels.shape}")  # 调试信息
 
             data_dict['voxels'] = voxels
             data_dict['voxel_coords'] = coordinates
             data_dict['voxel_num_points'] = num_points
         return data_dict
-
+    # ============ 🔥 新增：伪点云体素化方法 ============
+    def transform_points_to_voxels_pseudo(self, data_dict=None, config=None):
+        """伪点云体素化"""
+        if data_dict is None:
+            # 初始化时创建伪点云体素生成器
+            return partial(self.transform_points_to_voxels_pseudo, config=config)
+        
+        # 检查是否存在伪点云
+        if 'points_pseudo' not in data_dict:
+            return data_dict
+        
+        # 🔥 关键：为伪点云创建单独的体素生成器
+        if not hasattr(self, 'voxel_generator_pseudo') or self.voxel_generator_pseudo is None:
+            # 获取伪点云的特征维度
+            num_features_pseudo = config.get('NUM_POINT_FEATURES_PSEUDO', 9)
+            
+            self.voxel_generator_pseudo = VoxelGeneratorWrapper(
+                vsize_xyz=config.VOXEL_SIZE,
+                coors_range_xyz=self.point_cloud_range,
+                num_point_features=num_features_pseudo,  # 9维
+                max_num_points_per_voxel=config.MAX_POINTS_PER_VOXEL,
+                max_num_voxels=config.MAX_NUMBER_OF_VOXELS[self.mode],
+            )
+        
+        # 生成伪点云体素
+        points_pseudo = data_dict['points_pseudo']
+        voxel_output_pseudo = self.voxel_generator_pseudo.generate(points_pseudo)
+        voxels_pseudo, coordinates_pseudo, num_points_pseudo = voxel_output_pseudo
+        
+        # 🔥 关键修复：强制移除xyz，保留i+rgb+uv (6维)
+        # 输入: (M, max_points, 9) [x,y,z,i,r,g,b,u,v]
+        # 输出: (M, max_points, 6) [i,r,g,b,u,v]
+        voxels_pseudo = voxels_pseudo[..., 3:]  # 强制移除前3维
+        
+        print(f"[DEBUG] Pseudo voxels shape after removing xyz: {voxels_pseudo.shape}")  # 调试信息
+        
+        # 保存到data_dict
+        data_dict['voxels_pseudo'] = voxels_pseudo
+        data_dict['voxel_coords_pseudo'] = coordinates_pseudo
+        data_dict['voxel_num_points_pseudo'] = num_points_pseudo
+        
+        return data_dict
     def grid_sample_points_pseudo(self, data_dict=None, config=None):
+        """伪点云网格采样(降采样)"""
         if data_dict is None:
             return partial(self.grid_sample_points_pseudo, config=config)
 
+        if 'points_pseudo' not in data_dict:
+            return data_dict
+        
         max_distance = config.MAX_DISTANCE
         points = data_dict['points_pseudo']
-        dist_mask = points[:,0] < max_distance
-        col_mask  = (points[:,6]%2 == 0) & dist_mask
-        row_mask  = (points[:,7]%2 == 0) & dist_mask
-
+        
+        # 🔥 关键修复:检查实际维度
+        num_features = points.shape[1]
+        
+        # 距离mask
+        dist_mask = points[:, 0] < max_distance
+        
+        # 🔥 根据实际维度决定使用哪些列
+        if num_features >= 9:
+            # 原始9维: [x, y, z, i, r, g, b, u, v]
+            col_mask = (points[:, 7] % 2 == 0) & dist_mask  # 使用u通道(索引7)
+            row_mask = (points[:, 8] % 2 == 0) & dist_mask  # 使用v通道(索引8)
+        elif num_features >= 7:
+            # 编码后7维: [x, y, z, i, r, g, b]
+            col_mask = (points[:, 5] % 2 == 0) & dist_mask  # 使用g通道
+            row_mask = (points[:, 6] % 2 == 0) & dist_mask  # 使用b通道
+        else:
+            # 维度不足,只用距离mask
+            print(f"WARNING: points_pseudo has only {num_features} features, using distance mask only")
+            sample_mask = dist_mask
+            data_dict['points_pseudo'] = points[sample_mask]
+            return data_dict
+        
         ignore_mask = col_mask | row_mask
         sample_mask = ~ignore_mask
         data_dict['points_pseudo'] = points[sample_mask]
+        
         return data_dict
 
     def forward(self, data_dict):
