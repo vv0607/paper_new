@@ -5,6 +5,7 @@ from ...utils import common_utils, spconv_utils
 from ...ops.pointnet2.pointnet2_stack import voxel_pool_modules as voxelpool_stack_modules
 from ...ops.roiaware_pool3d import roiaware_pool3d_utils
 
+from ..model_utils.cbam import CBAM, CBAM3D
 import torch.nn.functional as F
 from ...utils import box_coder_utils, common_utils, loss_utils, box_utils
 import time
@@ -25,19 +26,22 @@ class MPCFHead(RoIHeadTemplate):
         # RoI Grid Pool
         c_out = 0
         self.roi_grid_pool_layers = nn.ModuleList()
-        for src_name in self.pool_cfg.FEATURES_SOURCE:
-            mlps = LAYER_cfg[src_name].MLPS
-            for k in range(len(mlps)):
-                mlps[k] = [input_channels[src_name]] + mlps[k]
-            pool_layer = voxelpool_stack_modules.NeighborVoxelSAModuleMSG(
-                query_ranges=LAYER_cfg[src_name].QUERY_RANGES,
-                nsamples=LAYER_cfg[src_name].NSAMPLE,
-                radii=LAYER_cfg[src_name].POOL_RADIUS,
-                mlps=mlps,
-                pool_method=LAYER_cfg[src_name].POOL_METHOD,
-            )
-            self.roi_grid_pool_layers.append(pool_layer)
-            c_out += sum([x[-1] for x in mlps])
+        pool_layer_cfg = self.pool_cfg.POOL_LAYERS 
+        mlps = pool_layer_cfg.MLPS
+        for k in range(len(mlps)):
+            mlps[k] = [input_channels] + mlps[k]
+
+        pool_layer = voxelpool_stack_modules.NeighborVoxelSAModuleMSG(
+            query_ranges=pool_layer_cfg.QUERY_RANGES,
+            nsamples=pool_layer_cfg.NSAMPLE,
+            radii=pool_layer_cfg.POOL_RADIUS,
+            mlps=mlps,
+            pool_method=pool_layer_cfg.POOL_METHOD,
+        )
+
+        self.roi_grid_pool_layers.append(pool_layer)
+        # 计算输出通道数 c_out
+        c_out = sum([x[-1] for x in mlps])
         GRID_SIZE = self.model_cfg.ROI_GRID_POOL.GRID_SIZE
 
         # RoI Point Pool
