@@ -1,7 +1,13 @@
 DATASET: 'KittiDatasetCustom'
-DATA_PATH: '../data/kitti_pseudo'
+DATA_PATH: '/home/dell/data/xzh/fang/MPCF/MPCF--3d_object_detection-main/data/kitti_pseudo'
 #DATA_PATH: '../data/kitti_pseudo_82devide'
-
+USE_PSEUDO_LABEL: True  # 如果想用伪点云
+PSEUDO_LABEL_DIR: 'depth_pseudo_rgbseguv_twise'
+# 🔥 关键添加：启用点云融合
+# MERGE_PSEUDO_POINTS: True      # 启用融合
+# MERGE_MODE: 'concat'           # 简单拼接模式
+# PSEUDO_POINT_FEATURES: 7       # 伪点云特征维度
+CREATE_GT_DATABASE: True  # 这个是关键！
 POINT_CLOUD_RANGE: [0, -40, -3, 70.4, 40, 1]
 
 DATA_SPLIT: {
@@ -14,13 +20,15 @@ INFO_PATH: {
     'test': [kitti_infos_val.pkl],
 }
 
-FOV_POINTS_ONLY: True
 
+FOV_POINTS_ONLY: True
+# 添加CBAM伪点云支持（新增）
+USE_CBAM_PSEUDO: False  # 默认False，在具体模型配置中覆盖为True
 
 DATA_AUGMENTOR:
     DISABLE_AUG_LIST: ['placeholder']
     AUG_CONFIG_LIST:
-        - NAME: gt_sampling_custom
+        - NAME: gt_sampling
           USE_ROAD_PLANE: False
           DB_INFO_PATH:
               - kitti_dbinfos_train_custom_seguv.pkl
@@ -47,9 +55,12 @@ DATA_AUGMENTOR:
 
 
 POINT_FEATURE_ENCODING: {
-    encoding_type: absolute_coordinates_encoding,
+    encoding_type: dual_absolute_coordinates_encoding,  # 🔥 使用双路径编码
+    encoding_type_pseudo: 'dual_absolute_coordinates_encoding_pseudo',
     used_feature_list: ['x', 'y', 'z', 'intensity'],
     src_feature_list: ['x', 'y', 'z', 'intensity'],
+    used_feature_list_pseudo: ['x', 'y', 'z', 'intensity', 'r', 'g', 'b', 'u', 'v'],
+    src_feature_list_pseudo: ['x', 'y', 'z', 'intensity', 'r', 'g', 'b', 'u', 'v'],
 }
 
 
@@ -70,3 +81,16 @@ DATA_PROCESSOR:
         'train': 16000,
         'test': 40000
       }
+    - NAME: grid_sample_points_pseudo
+      MAX_DISTANCE: 13
+      NUM_POINT_FEATURES: 9 
+        # 🔥 第3步：伪点云体素化（新增！）
+    - NAME: transform_points_to_voxels_pseudo
+      VOXEL_SIZE: [0.05, 0.05, 0.1]
+      MAX_POINTS_PER_VOXEL: 5
+      MAX_NUMBER_OF_VOXELS: {
+        'train': 16000,
+        'test': 40000
+      }
+      NUM_POINT_FEATURES_PSEUDO: 9  # 伪点云9维
+
