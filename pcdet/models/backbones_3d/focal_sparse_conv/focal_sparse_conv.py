@@ -157,7 +157,12 @@ class FocalSparseConv(spconv.SparseModule):
         voxel_indices_back = torch.cat(voxel_indices_back, dim=0)
         mask_kernel = torch.cat(mask_kernel_list, dim=0)
 
+        # x_fore = spconv.SparseConvTensor(voxel_features_fore, voxel_indices_fore, x.spatial_shape, x.batch_size)
+        # 确保 indices 是 int32 类型
+        voxel_indices_fore = voxel_indices_fore.int()  # 或者 .to(torch.int32)
         x_fore = spconv.SparseConvTensor(voxel_features_fore, voxel_indices_fore, x.spatial_shape, x.batch_size)
+        # x_back = spconv.SparseConvTensor(voxel_features_back, voxel_indices_back, x.spatial_shape, x.batch_size)
+        voxel_indices_back = voxel_indices_back.int()
         x_back = spconv.SparseConvTensor(voxel_features_back, voxel_indices_back, x.spatial_shape, x.batch_size)
 
         loss_box_of_pts = 0
