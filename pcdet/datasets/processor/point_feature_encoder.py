@@ -56,7 +56,10 @@ class PointFeatureEncoder(object):
         data_dict['use_lead_xyz'] = use_lead_xyz
 
         # 根据配置调用正确的编码函数来处理伪点云
-        if self.point_encoding_config.get('used_feature_list_pseudo', False) and 'points_pseudo' in data_dict:
+        # if self.point_encoding_config.get('used_feature_list_pseudo', False) and 'points_pseudo' in data_dict:
+        if (self.point_encoding_config.get('used_feature_list_pseudo', False) and 
+            'points_pseudo' in data_dict and 
+            data_dict['points_pseudo'] is not None):  # ← 加这个检查！
             data_dict['points_pseudo'], use_lead_xyz_pseudo = getattr(self, self.point_encoding_config.encoding_type_pseudo)(
                 data_dict['points_pseudo'], is_pseudo=True
             )
