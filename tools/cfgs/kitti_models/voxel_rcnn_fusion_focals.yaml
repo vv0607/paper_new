@@ -1,56 +1,81 @@
-# VoxelRCNN with FocalsConv and Fusion for MPCF
-# 基于MPCF项目的配置格式
-
 CLASS_NAMES: ['Car', 'Pedestrian', 'Cyclist']
 
 DATA_CONFIG:
     _BASE_CONFIG_: /home/dell/data/xzh/fang/MPCF/MPCF--3d_object_detection-main/tools/cfgs/dataset_configs/kitti_dataset_custom.yaml
     
-    # 仅保留基础配置中没有的配置项
+    DATA_PATH: '/home/dell/data/xzh/fang/MPCF/MPCF--3d_object_detection-main/data/kitti_pseudo'
+    POINT_CLOUD_RANGE: [0, -40, -3, 70.4, 40, 1]
+    
+    # 伪点云配置
     USE_PSEUDO_LABEL: True
     PSEUDO_LABEL_DIR: 'depth_pseudo_rgbseguv_twise'
     CREATE_GT_DATABASE: True
-    MERGE_PSEUDO_POINTS: True      # 启用融合
-    MERGE_MODE: 'concat'           # 简单拼接模式
-    PSEUDO_POINT_FEATURES: 7       # 伪点云特征维度
-    # 删除以下重复内容：
-    # - DATA_PATH（基础配置中已有）
-    # - POINT_CLOUD_RANGE（基础配置中已有，且现在一致）
-    # - DATA_PROCESSOR（基础配置中已有）
-    # - DATA_AUGMENTOR（基础配置中已有）
+    MERGE_PSEUDO_POINTS: True
+    MERGE_MODE: 'concat'
+    PSEUDO_POINT_FEATURES: 7
+    
+   # 🔥 阶段1: 不使用图像
+    USE_IMAGES: False
+    
+    DATA_AUGMENTOR:
+        DISABLE_AUG_LIST: ['placeholder']
+        AUG_CONFIG_LIST:
+            - NAME: gt_sampling
+              USE_ROAD_PLANE: False
+              DB_INFO_PATH:
+                  - kitti_dbinfos_train_custom_seguv.pkl
+              PREPARE: {
+                 filter_by_min_points: ['Car:5', 'Pedestrian:5', 'Cyclist:5'],
+              }
+              SAMPLE_GROUPS: ['Car:15','Pedestrian:10', 'Cyclist:10']
+              NUM_POINT_FEATURES: 7
+              DATABASE_WITH_FAKELIDAR: False
+              REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
+              LIMIT_WHOLE_SCENE: False
+
+            - NAME: random_world_flip
+              ALONG_AXIS_LIST: ['x']
+
+            - NAME: random_world_rotation
+              WORLD_ROT_ANGLE: [-0.39269908, 0.39269908]
+
+            - NAME: random_world_scaling
+              WORLD_SCALE_RANGE: [0.95, 1.05]
 
 MODEL:
-    NAME: VoxelRCNNFusion
+    NAME: VoxelRCNN
     
-    # 使用图像分支
-    USE_IMAGE_BRANCH: True  # 先设为False，确保基础版本能跑通
-    USE_FUSION: True
-    
-    # 体素特征编码器
     VFE:
         NAME: MeanVFE
         NUM_POINT_FEATURES: 7
         
-    # 3D稀疏卷积主干（使用FocalsConv）
     BACKBONE_3D:
         NAME: VoxelBackBone8xFocal
         
-    # BEV映射
+        # 🔥 不在backbone融合图像
+        USE_IMG: False
+        FUSE_SUM: False
+        
+        TOPK: True
+        THRESHOLD: 0.5
+        KERNEL_SIZE: 3
+        MASK_MULTI: False
+        SKIP_MASK_KERNEL: False
+        SKIP_MASK_KERNEL_IMG: False
+        ENLARGE_VOXEL_CHANNELS: -1
+        
     MAP_TO_BEV:
         NAME: HeightCompression
         NUM_BEV_FEATURES: 128
         
-    # 2D BEV主干
     BACKBONE_2D:
         NAME: BaseBEVBackbone
-        
         LAYER_NUMS: [5, 5]
         LAYER_STRIDES: [1, 2]
         NUM_FILTERS: [128, 256]
         UPSAMPLE_STRIDES: [1, 2]
         NUM_UPSAMPLE_FILTERS: [256, 256]
         
-    # 密集检测头
     DENSE_HEAD:
         NAME: AnchorHeadSingle
         CLASS_AGNOSTIC: False
@@ -109,10 +134,12 @@ MODEL:
                 'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
             }
             
-    # ROI Head配置
     ROI_HEAD:
         NAME: VoxelRCNNHead
         CLASS_AGNOSTIC: True
+        
+        # 🔥 阶段1: 不使用图像融合
+        USE_LI_FUSION: False
         
         SHARED_FC: [256, 256]
         CLS_FC: [256, 256]
@@ -192,7 +219,6 @@ MODEL:
         RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
         SCORE_THRESH: 0.1
         OUTPUT_RAW_SCORE: False
-        
         EVAL_METRIC: kitti
         
         NMS_CONFIG:
@@ -202,10 +228,9 @@ MODEL:
             NMS_PRE_MAXSIZE: 4096
             NMS_POST_MAXSIZE: 500
 
-# 优化器配置
 OPTIMIZATION:
-    BATCH_SIZE_PER_GPU: 4
-    NUM_EPOCHS: 80
+    BATCH_SIZE_PER_GPU: 1
+    NUM_EPOCHS: 60
     
     OPTIMIZER: adam_onecycle
     LR: 0.003
