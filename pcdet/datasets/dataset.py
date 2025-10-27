@@ -149,12 +149,14 @@ class DatasetTemplate(torch_data.Dataset):
     @staticmethod
     def collate_batch(batch_list, _unused=False):
         data_dict = defaultdict(list)
+        
         for cur_sample in batch_list:
             for key, val in cur_sample.items():
                 data_dict[key].append(val)
+        
         batch_size = len(batch_list)
         ret = {}
-
+        
         for key, val in data_dict.items():
             try:
                 if key in ['voxels', 'voxel_num_points']:
@@ -171,11 +173,31 @@ class DatasetTemplate(torch_data.Dataset):
                     for k in range(batch_size):
                         batch_gt_boxes3d[k, :val[k].__len__(), :] = val[k]
                     ret[key] = batch_gt_boxes3d
+                # ⭐ 新增: 处理图像
+                elif key == 'images':
+                    # 过滤None值
+                    images = [img for img in val if img is not None]
+                    if len(images) > 0:
+                        ret[key] = torch.stack(images, dim=0)  # (B, 3, H, W)
+                    else:
+                        ret[key] = None
+                # 🔥 处理calib
+                elif key == 'calib':
+                    ret[key] = val
+                # 🔥 处理伪点云
+                elif key in ['points_pseudo', 'voxels_pseudo', 'voxel_num_points_pseudo']:
+                    ret[key] = np.concatenate(val, axis=0)
+                elif key in ['voxel_coords_pseudo']:
+                    coors = []
+                    for i, coor in enumerate(val):
+                        coor_pad = np.pad(coor, ((0, 0), (1, 0)), mode='constant', constant_values=i)
+                        coors.append(coor_pad)
+                    ret[key] = np.concatenate(coors, axis=0)
                 else:
                     ret[key] = np.stack(val, axis=0)
             except:
                 print('Error in collate_batch: key=%s' % key)
                 raise TypeError
-
+        
         ret['batch_size'] = batch_size
         return ret
