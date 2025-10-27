@@ -124,28 +124,45 @@ class VoxelBackBone8xFocal(nn.Module): # 定义一个继承自nn.Module的类
         img_pretrain = model_cfg.get('IMG_PRETRAIN', "checkpoints/deeplabv3_resnet50_coco-cd0a2569.pth") # 获取图像预训练模型路径
         use_stages = model_cfg.get('USE_STAGES', [1, 2, 3]) # 获取使用的阶段，默认为[1, 2, 3]
         
-        if use_img: # 如果使用图像
-            model_cfg_seg=dict( # 定义语义分割模型的配置字典
-                name='SemDeepLabV3', # 模型名称
-                backbone='ResNet50', # 主干网络
-                num_class=21, # 类别数（在COCO上预训练）
-                args={"feat_extract_layer": ["layer1"], # 提取特征的层
-                    "pretrained_path": img_pretrain}, # 预训练模型路径
-                channel_reduce={ # 通道缩减配置
-                    "in_channels": [256], # 输入通道
-                    "out_channels": [16], # 输出通道
-                    "kernel_size": [1], # 卷积核大小
-                    "stride": [1], # 步长
-                    "bias": [False] # 是否使用偏置
+        if use_img:
+            # 🔥 先只用layer1测试
+            model_cfg_seg = dict(
+                name='SemDeepLabV3',
+                backbone='ResNet50',
+                num_class=21,
+                args={
+                    "feat_extract_layer": ["layer1"],  # ← 只用1层
+                    "pretrained_path": img_pretrain
+                },
+                channel_reduce={
+                    "in_channels": [256],
+                    "out_channels": [64],  # ← 64通道
+                    "kernel_size": [1],
+                    "stride": [1],
+                    "bias": [False]
                 }
             )
-            cfg_dict = ConfigDict('SemDeepLabV3') # 创建ConfigDict实例
-            objDict.to_object(cfg_dict, **model_cfg_seg) # 将配置字典转换为对象属性
-            self.semseg = PyramidFeat2D(optimize=True, model_cfg=cfg_dict) # 创建PyramidFeat2D实例
+            
+            cfg_dict = ConfigDict('SemDeepLabV3')
+            objDict.to_object(cfg_dict, **model_cfg_seg)
+            self.semseg = PyramidFeat2D(optimize=True, model_cfg=cfg_dict)
+            
+            # 只创建layer1的融合模块
+            self.conv_focal_multimodal_layer1 = FocalSparseConv(
+                16, 16,
+                image_channel=64,  # ← 64通道
+                topk=topk,
+                threshold=threshold,
+                use_img=True,
+                skip_mask_kernel=skip_mask_kernel_image,
+                voxel_stride=1,
+                norm_fn=norm_fn,
+                indice_key='spconv_focal_multimodal_layer1'
+            )
 
-            self.conv_focal_multimodal = FocalSparseConv(16, 16, image_channel=model_cfg_seg['channel_reduce']['out_channels'][0], # 创建多模态焦点稀疏卷积实例
-                                        topk=topk, threshold=threshold, use_img=True, skip_mask_kernel=skip_mask_kernel_image, # 传入相关参数
-                                        voxel_stride=1, norm_fn=norm_fn, indice_key='spconv_focal_multimodal') # 传入体素步长、归一化函数和indice_key
+            # self.conv_focal_multimodal = FocalSparseConv(16, 16, image_channel=model_cfg_seg['channel_reduce']['out_channels'][0], # 创建多模态焦点稀疏卷积实例
+            #                             topk=topk, threshold=threshold, use_img=True, skip_mask_kernel=skip_mask_kernel_image, # 传入相关参数
+            #                             voxel_stride=1, norm_fn=norm_fn, indice_key='spconv_focal_multimodal') # 传入体素步长、归一化函数和indice_key
 
         special_spconv_fn = partial(FocalSparseConv, mask_multi=mask_multi, enlarge_voxel_channels=enlarge_voxel_channels, # 创建一个用于FocalSparseConv的偏函数
                                     topk=topk, threshold=threshold, kernel_size=kernel_size, padding=kernel_size//2, # 传入相关参数
@@ -231,12 +248,31 @@ class VoxelBackBone8xFocal(nn.Module): # 定义一个继承自nn.Module的类
         x = self.conv_input(input_sp_tensor)
         x_conv1, batch_dict = self.conv1(x, batch_dict)
 
+        # if self.use_img:
+        #     x_image = self.semseg(batch_dict['images'])['layer1_feat2d']
+        #     x_conv1, batch_dict = self.conv_focal_multimodal(x_conv1, batch_dict, x_image)
+
+        # x_conv2, batch_dict = self.conv2(x_conv1, batch_dict)
+        # x_conv3, batch_dict = self.conv3(x_conv2, batch_dict)
+        # 🔥 提取多尺度图像特征
         if self.use_img:
-            x_image = self.semseg(batch_dict['images'])['layer1_feat2d']
-            x_conv1, batch_dict = self.conv_focal_multimodal(x_conv1, batch_dict, x_image)
+            if 'calib' not in batch_dict or 'images' not in batch_dict:
+                print(f"[WARNING] Missing calib or images")
+            else:
+                image_features = self.semseg(batch_dict['images'])
+                x_image = image_features['layer1_feat2d']
+                
+                # 添加调试输出
+                print(f"[DEBUG] x_image shape: {x_image.shape}")
+                print(f"[DEBUG] x_conv1 features shape: {x_conv1.features.shape}")
+                
+                x_conv1, batch_dict = self.conv_focal_multimodal_layer1(
+                    x_conv1, batch_dict, x_image
+                )
 
         x_conv2, batch_dict = self.conv2(x_conv1, batch_dict)
         x_conv3, batch_dict = self.conv3(x_conv2, batch_dict)
+
         x_conv4, batch_dict = self.conv4(x_conv3, batch_dict)
 
         out = self.conv_out(x_conv4)
