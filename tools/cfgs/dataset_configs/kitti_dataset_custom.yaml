@@ -1,12 +1,18 @@
 DATASET: 'KittiDatasetCustom'
 DATA_PATH: '/home/dell/data/xzh/fang/MPCF/MPCF--3d_object_detection-main/data/kitti_pseudo'
 #DATA_PATH: '../data/kitti_pseudo_82devide'
-USE_PSEUDO_LABEL: True  # 如果想用伪点云
-PSEUDO_LABEL_DIR: 'depth_pseudo_rgbseguv_twise'
-# 🔥 关键添加：启用点云融合
-# MERGE_PSEUDO_POINTS: True      # 启用融合
-# MERGE_MODE: 'concat'           # 简单拼接模式
-# PSEUDO_POINT_FEATURES: 7       # 伪点云特征维度
+DATA_CONFIG:
+    # 图像相关配置
+    USE_IMAGES: True              # ⭐ 启用图像加载
+    USE_IMAGE_FEATURES: True      # 启用图像特征
+    IMAGE_SIZE: [384, 1280]       # 图像尺寸 [H, W]
+    # 如果想用伪点云
+    USE_PSEUDO_LABEL: True 
+    PSEUDO_LABEL_DIR: 'depth_pseudo_rgbseguv_twise'
+    # 🔥 关键添加：启用点云融合
+    # MERGE_PSEUDO_POINTS: True      # 启用融合
+    # MERGE_MODE: 'concat'           # 简单拼接模式
+    # PSEUDO_POINT_FEATURES: 7       # 伪点云特征维度
 CREATE_GT_DATABASE: True  # 这个是关键！
 POINT_CLOUD_RANGE: [0, -40, -3, 70.4, 40, 1]
 
