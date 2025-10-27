@@ -16,6 +16,8 @@ from ..dataset import DatasetTemplate
 from ...ops.roiaware_pool3d import roiaware_pool3d_utils
 from ...utils import box_utils, calibration_kitti, common_utils, object3d_kitti
 # from .kitti_object_eval_python import kitti_utils
+# 🔥 新增：导入去噪模块
+from ..processor.pseudo_point_denoiser import PseudoPointDenoiser
 
 
 class KittiDataset(DatasetTemplate):
@@ -62,12 +64,29 @@ class KittiDataset(DatasetTemplate):
         self.pseudo_point_features = dataset_cfg.get('PSEUDO_POINT_FEATURES', 7)  # [x,y,z,i,r,g,b]
         self.use_image_features = dataset_cfg.get('USE_IMAGE_FEATURES', False)
         self.image_size = dataset_cfg.get('IMAGE_SIZE', [375, 1242])
+        self.use_images = dataset_cfg.get('USE_IMAGES', False)
         
         # 新增：图像增强配置
         self.image_augmentor = None
         if dataset_cfg.get('IMAGE_AUGMENTOR', None) is not None and training:
             from ..augmentor.image_augmentor import ImageAugmentor
             self.image_augmentor = ImageAugmentor(dataset_cfg.IMAGE_AUGMENTOR)
+        # 🔥 新增：初始化伪点云去噪器
+        if self.use_pseudo_label:
+            denoiser_config = dataset_cfg.get('PSEUDO_POINT_DENOISER', {
+                'USE_CONFIDENCE_FILTER': True,
+                'CONFIDENCE_THRESHOLD': 0.7,
+                'USE_DEPTH_FILTER': True,
+                'MIN_DEPTH': 2.0,
+                'MAX_DEPTH': 50.0,
+                'USE_SOR': False,
+                'USE_DOWNSAMPLING': True,
+                'MAX_PSEUDO_POINTS': 40000
+            })
+            self.pseudo_denoiser = PseudoPointDenoiser(denoiser_config)
+            self.logger.info(f'✓ Initialized pseudo point denoiser with config: {denoiser_config}')
+        else:
+            self.pseudo_denoiser = None
             
         # 加载数据信息
         self.kitti_infos = []
@@ -188,31 +207,72 @@ class KittiDataset(DatasetTemplate):
         return np.fromfile(str(lidar_file), dtype=np.float32).reshape(-1, 4)
         
     def get_lidar_pseudo(self, idx):
-        """获取伪点云数据（MPCF格式）"""
+        """
+        获取伪点云数据 + 自适应降采样
+        确保每个样本都有足够的点
+        """
         pseudo_file = self.root_split_path / self.pseudo_label_dir / ('%s.bin' % idx)
         
-        if pseudo_file.exists():
-            # 获取伪点云特征维度
-            num_point_features_pseudo = 9  # 默认值
-            if hasattr(self.dataset_cfg, 'DATA_AUGMENTOR') and \
-            hasattr(self.dataset_cfg.DATA_AUGMENTOR, 'AUG_CONFIG_LIST') and \
-            len(self.dataset_cfg.DATA_AUGMENTOR.AUG_CONFIG_LIST) > 0:
-                num_point_features_pseudo = getattr(
-                    self.dataset_cfg.DATA_AUGMENTOR.AUG_CONFIG_LIST[0],
-                    'NUM_POINT_FEATURES_PSEUDO',
-                    9
-                )
+        if not pseudo_file.exists():
+            if self.logger is not None:
+                self.logger.warning(f'Pseudo point cloud not found: {pseudo_file}')
+            return None
+        
+        try:
+            # 加载原始伪点云（9维）
+            point_pseudo = np.fromfile(str(pseudo_file), dtype=np.float32).reshape(-1, 9)
             
-            point_pseudo = np.fromfile(str(pseudo_file), dtype=np.float32).reshape(-1, num_point_features_pseudo)
+            # ========== 自适应处理 ==========
+            min_points = 5000      # 最少保留点数
+            target_points = 30000  # 目标点数
+            max_points = 80000     # 最多点数
             
-            # 【关键】范围过滤，和原始MPCF一致
+            # 基础范围过滤（高度过滤）
             range_mask = (point_pseudo[:, 2] < 1.7) & (point_pseudo[:, 2] > -1.7)
             point_pseudo = point_pseudo[range_mask]
             
+            num_points = len(point_pseudo)
+            
+            # 检查是否为空
+            if num_points == 0:
+                if self.logger is not None:
+                    self.logger.warning(f'All points filtered by range for {idx}')
+                return None
+            
+            # 🔥 自适应降采样
+            if num_points <= target_points:
+                # 点数合适，直接返回
+                pass
+                
+            elif num_points <= max_points:
+                # 点数略多，随机降采样
+                indices = np.random.choice(num_points, target_points, replace=False)
+                point_pseudo = point_pseudo[indices]
+                
+            else:
+                # 点数太多，体素降采样 + 随机采样
+                voxel_size = 0.1  # 10cm
+                points_int = (point_pseudo[:, :3] / voxel_size).astype(np.int32)
+                _, unique_indices = np.unique(points_int, axis=0, return_index=True)
+                point_pseudo = point_pseudo[unique_indices]
+                
+                # 如果还是太多，随机采样
+                if len(point_pseudo) > max_points:
+                    indices = np.random.choice(len(point_pseudo), max_points, replace=False)
+                    point_pseudo = point_pseudo[indices]
+            
+            # 检查是否太少
+            if len(point_pseudo) < min_points:
+                if self.logger is not None and np.random.rand() < 0.01:  # 1% 概率打印
+                    self.logger.warning(
+                        f'Sample {idx}: only {len(point_pseudo)} points (< {min_points})'
+                    )
+            
             return point_pseudo
-        else:
+            
+        except Exception as e:
             if self.logger is not None:
-                self.logger.warning(f'Pseudo point cloud not found: {pseudo_file}')
+                self.logger.error(f'Error loading pseudo points for {idx}: {e}')
             return None
             
     def get_image(self, idx):
@@ -485,7 +545,7 @@ class KittiDataset(DatasetTemplate):
         """
         获取一个数据样本
         Args:
-            index: 索引prepare_data
+            index: 索引
         Returns:
             data_dict: 数据字典
         """
@@ -496,12 +556,9 @@ class KittiDataset(DatasetTemplate):
         info = copy.deepcopy(self.kitti_infos[index])
         sample_idx = info['point_cloud']['lidar_idx']
 
-        # ========== 🔥 关键：像MPCF一样，分别加载，不拼接 ==========
+        # 加载点云
         points = self.get_lidar(sample_idx)  # (N, 4) - 原始LiDAR点云
         points_pseudo = self.get_lidar_pseudo(sample_idx)  # (M, 9) - 伪点云
-        
-        print(f"[DEBUG] 原始点云形状: {points.shape}")
-        print(f"[DEBUG] 伪点云形状: {points_pseudo.shape}")
         
         calib = self.get_calib(sample_idx)
 
@@ -512,7 +569,7 @@ class KittiDataset(DatasetTemplate):
             fov_flag = self.get_fov_flag(pts_rect, img_shape, calib)
             points = points[fov_flag]
 
-        # ========== ⭐ 核心：保持双字段，像MPCF一样 ==========
+        # 构建输入字典
         input_dict = {
             'points': points,              # (N, 4) - 保持原样
             'points_pseudo': points_pseudo, # (M, 9) - 保持原样
@@ -546,6 +603,43 @@ class KittiDataset(DatasetTemplate):
 
         # 数据准备（包含数据增强和体素化）
         data_dict = self.prepare_data(data_dict=input_dict)
+        # 🔥 prepare_data 会丢弃某些字段（如calib），需要重新加回来
+        data_dict['calib'] = calib
+        
+        # ========== ⭐ 新增: 加载图像数据 ==========
+        if self.use_images:
+            try:
+                # 加载RGB图像
+                image = self.get_image(sample_idx)  # (H, W, 3) numpy array
+                
+                # 转换为tensor并归一化
+                import torch
+                import torchvision.transforms as transforms
+                
+                # 定义图像预处理
+                image_transform = transforms.Compose([
+                    transforms.ToPILImage(),
+                    transforms.ToTensor(),  # 转换为 (3, H, W) 并归一化到 [0, 1]
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406],  # ImageNet标准化
+                        std=[0.229, 0.224, 0.225]
+                    )
+                ])
+                
+                # 应用变换
+                image_tensor = image_transform(image)  # (3, H, W)
+                data_dict['images'] = image_tensor
+                
+                if self.logger is not None and index % 1000 == 0:  # 每1000个样本打印一次
+                    self.logger.info(f'[Image Loading] Sample {sample_idx}: image shape {image_tensor.shape}')
+                    
+            except Exception as e:
+                if self.logger is not None:
+                    self.logger.warning(f'Failed to load image for {sample_idx}: {e}')
+                data_dict['images'] = None
+        else:
+            data_dict['images'] = None
+        # ========================================
         
         # 添加图像形状信息
         data_dict['image_shape'] = img_shape
@@ -620,10 +714,25 @@ class KittiDataset(DatasetTemplate):
                 # 🔑 支持双点云：points/points_pseudo
                 elif key in ['points', 'voxel_coords', 'points_pseudo', 'voxel_coords_pseudo']:
                     coors = []
-                    for i, coor in enumerate(val):
+                    # for i, coor in enumerate(val):
+                    #     coor_pad = np.pad(coor, ((0, 0), (1, 0)), mode='constant', constant_values=i)
+                    #     coors.append(coor_pad)
+                    for i, coor in enumerate(data_dict[key]):
+                        # 🔥 修复：处理 None 和空数组
+                        if coor is None:
+                            continue  # 跳过 None
+                        if coor.shape[0] == 0:
+                            continue  # 跳过空数组
                         coor_pad = np.pad(coor, ((0, 0), (1, 0)), mode='constant', constant_values=i)
                         coors.append(coor_pad)
-                    ret[key] = np.concatenate(coors, axis=0)
+
+                    # 如果所有样本都被过滤了，创建一个空数组
+                    if len(coors) == 0:
+                        # 需要知道维度，使用默认值（通常是 4: batch_id, z, y, x）
+                        ret[key] = np.zeros((0, 4), dtype=np.int32)
+                    else:
+                        ret[key] = np.concatenate(coors, axis=0)
+                    # ret[key] = np.concatenate(coors, axis=0)
                     
                 elif key in ['gt_boxes']:
                     max_gt = max([len(x) for x in val])
