@@ -17,8 +17,32 @@ class FocalSparseConv(spconv.SparseModule):
         super(FocalSparseConv, self).__init__()
 
         self.conv = spconv.SubMConv3d(inplanes, planes, kernel_size=kernel_size, stride=1, bias=False, indice_key=indice_key)
-        self.bn1 = norm_fn(planes if fuse_sum else 2 * planes)
+        # self.bn1 = norm_fn(planes if fuse_sum else 2 * planes)
+        # 🔥 先计算 fusion_channels
+        voxel_channel = enlarge_voxel_channels if enlarge_voxel_channels>0 else inplanes
+        if use_img:
+            fusion_channels = max(voxel_channel, image_channel)
+        else:
+            fusion_channels = planes
+        
+        # 🔥 然后根据融合方式创建 bn1
+        if use_img:
+            bn_channels = fusion_channels if fuse_sum else fusion_channels * 2
+        else:
+            bn_channels = planes
+
+        self.bn1 = norm_fn(bn_channels)
         self.relu = nn.ReLU(True)
+        # 添加输出投影层
+        if use_img:
+            fusion_channels = max(voxel_channel, image_channel)
+            fusion_out_channels = fusion_channels if fuse_sum else fusion_channels * 2
+            if fusion_out_channels != planes:
+                self.output_proj = nn.Linear(fusion_out_channels, planes)
+            else:
+                self.output_proj = None
+        else:
+            self.output_proj = None
         offset_channels = kernel_size**3
 
         self.topk = topk
@@ -30,8 +54,30 @@ class FocalSparseConv(spconv.SparseModule):
         self.use_img = use_img
         self.fuse_sum = fuse_sum
 
+        # voxel_channel = enlarge_voxel_channels if enlarge_voxel_channels>0 else inplanes
+        # in_channels = image_channel + voxel_channel if use_img else voxel_channel
         voxel_channel = enlarge_voxel_channels if enlarge_voxel_channels>0 else inplanes
-        in_channels = image_channel + voxel_channel if use_img else voxel_channel
+
+        # 🔥 添加投影层以匹配维度
+        if use_img:
+            self.fusion_channels = max(voxel_channel, image_channel)
+            
+            if voxel_channel != image_channel:
+                self.voxel_proj = nn.Linear(voxel_channel, self.fusion_channels)
+                self.image_proj = nn.Linear(image_channel, self.fusion_channels)
+            else:
+                self.voxel_proj = None
+                self.image_proj = None
+            
+            # 🔥 根据融合方式确定 in_channels（这段要在 if use_img 内）
+            if fuse_sum:
+                in_channels = self.fusion_channels  # sum: 64
+            else:
+                in_channels = self.fusion_channels * 2  # concat: 128
+        else:
+            self.voxel_proj = None
+            self.image_proj = None
+            in_channels = voxel_channel
 
         self.conv_enlarge = spconv.SparseSequential(spconv.SubMConv3d(inplanes, enlarge_voxel_channels, 
             kernel_size=3, stride=1, padding=1, bias=False, indice_key=indice_key+'_enlarge'),
@@ -39,6 +85,18 @@ class FocalSparseConv(spconv.SparseModule):
             nn.ReLU(True)) if enlarge_voxel_channels>0 else None
 
         self.conv_imp = spconv.SubMConv3d(in_channels, offset_channels, kernel_size=3, stride=1, padding=1, bias=False, indice_key=indice_key+'_imp')
+        # 🔥 添加调试信息
+        print(f"[DEBUG __init__] FocalSparseConv initialized:")
+        print(f"  use_img={use_img}")
+        print(f"  fuse_sum={fuse_sum}")
+        print(f"  voxel_channel={voxel_channel}")
+        print(f"  image_channel={image_channel}")
+        if use_img:
+            print(f"  fusion_channels={self.fusion_channels}")
+            print(f"  has_voxel_proj={self.voxel_proj is not None}")
+            print(f"  has_image_proj={self.image_proj is not None}")
+        print(f"  in_channels={in_channels}")
+        print(f"  conv_imp.in_channels={self.conv_imp.in_channels}")
 
         _step = int(kernel_size//2)
         kernel_offsets = [[i, j, k] for i in range(-_step, _step+1) for j in range(-_step, _step+1) for k in range(-_step, _step+1)]
@@ -63,6 +121,16 @@ class FocalSparseConv(spconv.SparseModule):
         batch_index = x.indices[:, 0]
         spatial_indices = x.indices[:, 1:] * self.voxel_stride
         voxels_3d = spatial_indices * self.voxel_size + self.point_cloud_range[:3]
+        # 🔥 添加检查
+        if 'calib' not in batch_dict:
+            print(f"[WARNING] Missing 'calib' in batch_dict, skipping image fusion")
+            return x.features
+        
+        if 'images' not in batch_dict:
+            print(f"[WARNING] Missing 'images' in batch_dict, skipping image fusion")
+            return x.features
+        
+        # 原有代码
         calibs = batch_dict['calib']
         batch_size = batch_dict['batch_size']
         h, w = batch_dict['images'].shape[2:]
@@ -103,14 +171,30 @@ class FocalSparseConv(spconv.SparseModule):
             image_features_batch = torch.zeros((voxel_features_sparse.shape[0], x_rgb_batch.shape[0]), device=x_rgb_batch.device)
             image_features_batch[filter_idx] = x_rgb_batch[:, voxels_2d_int[:, 1], voxels_2d_int[:, 0]].permute(1, 0).contiguous()
 
-            if fuse_sum:
-                image_with_voxelfeature = image_features_batch + voxel_features_sparse
+            # if fuse_sum:
+            #     image_with_voxelfeature = image_features_batch + voxel_features_sparse
+            # else:
+            #     image_with_voxelfeature = torch.cat([image_features_batch, voxel_features_sparse], dim=1)
+            # 🔥 投影到相同维度（如果需要）
+            if self.voxel_proj is not None:
+                voxel_features_proj = self.voxel_proj(voxel_features_sparse)
+                image_features_proj = self.image_proj(image_features_batch)
             else:
-                image_with_voxelfeature = torch.cat([image_features_batch, voxel_features_sparse], dim=1)
+                voxel_features_proj = voxel_features_sparse
+                image_features_proj = image_features_batch
+
+            # 融合特征
+            if fuse_sum:
+                image_with_voxelfeature = image_features_proj + voxel_features_proj
+            else:
+                image_with_voxelfeature = torch.cat([image_features_proj, voxel_features_proj], dim=1)  # ← 用投影后的特征！
 
             image_with_voxelfeatures.append(image_with_voxelfeature)
 
         image_with_voxelfeatures = torch.cat(image_with_voxelfeatures)
+        print(f"[DEBUG multimodal] Input x.features shape: {x.features.shape}")
+        print(f"[DEBUG multimodal] Input x_rgb shape: {x_rgb.shape}")
+        print(f"[DEBUG multimodal] Output features shape: {image_with_voxelfeatures.shape}")
         return image_with_voxelfeatures
 
     def _gen_sparse_features(self, x, imps_3d, batch_dict, voxels_3d):
@@ -207,11 +291,19 @@ class FocalSparseConv(spconv.SparseModule):
         voxels_3d = spatial_indices * self.voxel_size + self.point_cloud_range[:3]
 
         if self.use_img:
-            features_multimodal = self.construct_multimodal_features(x, x_rgb, batch_dict)
+            # features_multimodal = self.construct_multimodal_features(x, x_rgb, batch_dict)
+            features_multimodal = self.construct_multimodal_features(x, x_rgb, batch_dict, self.fuse_sum)
             x_predict = spconv.SparseConvTensor(features_multimodal, x.indices, x.spatial_shape, x.batch_size)
         else:
             x_predict = self.conv_enlarge(x) if self.conv_enlarge else x
 
+        print(f"[DEBUG] Before conv_imp:")
+        print(f"  x_predict.features.shape: {x_predict.features.shape}")
+        print(f"  conv_imp.in_channels: {self.conv_imp.in_channels}")
+        print(f"  Expected in_channels (from __init__): {self.fusion_channels * 2 if (self.use_img and not self.fuse_sum) else self.fusion_channels if self.use_img else 'N/A'}")
+        print(f"  voxel_proj exists: {self.voxel_proj is not None}")
+        print(f"  image_proj exists: {self.image_proj is not None}")
+        # print(f"  Expected: in_channels={self.in_channels}, image_channel={self.image_channel}")     
         imps_3d = self.conv_imp(x_predict).features
 
         x_fore, x_back, loss_box_of_pts, mask_kernel = self._gen_sparse_features(x, imps_3d, batch_dict, voxels_3d)
@@ -226,6 +318,10 @@ class FocalSparseConv(spconv.SparseModule):
 
         out = out.replace_feature(self.bn1(out.features))
         out = out.replace_feature(self.relu(out.features))
+        # 投影回输出维度
+        if self.output_proj is not None:
+            out = out.replace_feature(self.output_proj(out.features))
 
         batch_dict['loss_box_of_pts'] += loss_box_of_pts
         return out, batch_dict
+
