@@ -3,7 +3,14 @@ import torch.nn as nn
 from .roi_head_template import RoIHeadTemplate
 from ...utils import common_utils, spconv_utils
 from ...ops.pointnet2.pointnet2_stack import voxel_pool_modules as voxelpool_stack_modules
-
+# 🔥 Stage 2新增导入
+try:
+    from .li_fusion_module import LIFusionModule
+    from .roi_image_projection import ROIImageProjection
+    LI_FUSION_AVAILABLE = True
+except ImportError:
+    LI_FUSION_AVAILABLE = False
+    print("Warning: LI-Fusion modules not available")
 
 class VoxelRCNNHead(RoIHeadTemplate):
     def __init__(self, input_channels, model_cfg, point_cloud_range, voxel_size, num_class=1, **kwargs):
@@ -13,6 +20,13 @@ class VoxelRCNNHead(RoIHeadTemplate):
         LAYER_cfg = self.pool_cfg.POOL_LAYERS
         self.point_cloud_range = point_cloud_range
         self.voxel_size = voxel_size
+        # 🔥 新增: 检查是否启用LI-Fusion
+        self.use_li_fusion = model_cfg.get('USE_LI_FUSION', False) and LI_FUSION_AVAILABLE
+        
+        if self.use_li_fusion:
+            print("[VoxelRCNNHead] ✅ LI-Fusion ENABLED")
+        else:
+            print("[VoxelRCNNHead] ❌ LI-Fusion DISABLED")
 
         c_out = 0
         self.roi_grid_pool_layers = nn.ModuleList()
@@ -49,6 +63,29 @@ class VoxelRCNNHead(RoIHeadTemplate):
             if k != self.model_cfg.SHARED_FC.__len__() - 1 and self.model_cfg.DP_RATIO > 0:
                 shared_fc_list.append(nn.Dropout(self.model_cfg.DP_RATIO))
         self.shared_fc_layer = nn.Sequential(*shared_fc_list)
+        if self.use_li_fusion:
+            fusion_cfg = model_cfg.FUSION_CONFIG
+            
+            # ROI图像特征投影
+            self.roi_image_proj = ROIImageProjection(
+                image_feature_dim=fusion_cfg.IMAGE_FEATURE_DIM,
+                output_dim=fusion_cfg.IMAGE_FEATURE_DIM,
+                roi_size=fusion_cfg.ROI_IMAGE_PROJECTION.get('ROI_SIZE', 7),
+                use_pyramid=fusion_cfg.ROI_IMAGE_PROJECTION.get('USE_PYRAMID', True)
+            )
+            
+            # LI-Fusion模块
+            self.fusion_module = LIFusionModule(
+                point_dim=self.model_cfg.SHARED_FC[-1],
+                image_dim=fusion_cfg.IMAGE_FEATURE_DIM,
+                fusion_dim=self.model_cfg.SHARED_FC[-1],
+                class_names=fusion_cfg.CLASS_NAMES,
+                class_fusion_weights=fusion_cfg.get('CLASS_FUSION_WEIGHTS', None)
+            )
+            
+            print(f"[VoxelRCNNHead] 融合配置:")
+            print(f"  Point dim: {self.model_cfg.SHARED_FC[-1]}")
+            print(f"  Image dim: {fusion_cfg.IMAGE_FEATURE_DIM}")
 
         cls_fc_list = []
         for k in range(0, self.model_cfg.CLS_FC.__len__()):
@@ -234,6 +271,34 @@ class VoxelRCNNHead(RoIHeadTemplate):
         # Box Refinement
         pooled_features = pooled_features.view(pooled_features.size(0), -1)
         shared_features = self.shared_fc_layer(pooled_features)
+        if self.use_li_fusion and 'image_features' in batch_dict:
+            # 提取ROI的图像特征
+            rois = batch_dict['rois'].view(-1, batch_dict['rois'].shape[-1])  # (BxN, 7+1)
+            
+            try:
+                roi_image_features = self.roi_image_proj(
+                    batch_dict['image_features'],
+                    rois,
+                    batch_dict
+                )  # (BxN, 256)
+                
+                # 获取ROI标签
+                roi_labels = batch_dict.get('roi_labels', None)
+                if roi_labels is not None:
+                    roi_labels = roi_labels.view(-1)  # (BxN,)
+                
+                # 融合3D特征和2D特征
+                shared_features = self.fusion_module(
+                    shared_features,      # 3D ROI特征
+                    roi_image_features,   # 2D图像特征
+                    roi_labels           # 类别标签
+                )  # (BxN, 256)
+                
+            except Exception as e:
+                print(f"[VoxelRCNNHead] Warning: Fusion failed: {e}")
+                # 融合失败，继续使用纯3D特征
+                pass
+            
         rcnn_cls = self.cls_pred_layer(self.cls_fc_layers(shared_features))
         rcnn_reg = self.reg_pred_layer(self.reg_fc_layers(shared_features))
 
