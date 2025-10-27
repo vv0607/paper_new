@@ -173,8 +173,13 @@ class DataProcessor(object):
         mask = common_utils.mask_points_by_range(data_dict['points'], self.point_cloud_range)
         data_dict['points'] = data_dict['points'][mask]
 
-        mask = common_utils.mask_points_by_range(data_dict['points_pseudo'], self.point_cloud_range)
-        data_dict['points_pseudo'] = data_dict['points_pseudo'][mask]
+        # mask = common_utils.mask_points_by_range(data_dict['points_pseudo'], self.point_cloud_range)
+        # data_dict['points_pseudo'] = data_dict['points_pseudo'][mask]
+        if 'points_pseudo' in data_dict and data_dict['points_pseudo'] is not None:
+            mask = common_utils.mask_points_by_range(data_dict['points_pseudo'], self.point_cloud_range)
+            data_dict['points_pseudo'] = data_dict['points_pseudo'][mask]
+            if len(data_dict['points_pseudo']) == 0:
+                data_dict['points_pseudo'] = None
 
 
         if data_dict.get('gt_boxes', None) is not None and config.REMOVE_OUTSIDE_BOXES and self.training:
@@ -194,6 +199,7 @@ class DataProcessor(object):
             points = points[shuffle_idx]
             data_dict['points'] = points
 
+        if data_dict.get('points_pseudo') is not None:
             points_pseudo = data_dict['points_pseudo']
             shuffle_idx = np.random.permutation(points_pseudo.shape[0])
             points_pseudo = points_pseudo[shuffle_idx]
@@ -260,7 +266,8 @@ class DataProcessor(object):
             return partial(self.transform_points_to_voxels_pseudo, config=config)
         
         # 检查是否存在伪点云
-        if 'points_pseudo' not in data_dict:
+        # if 'points_pseudo' not in data_dict:
+        if 'points_pseudo' not in data_dict or data_dict['points_pseudo'] is None:
             return data_dict
         
         # 🔥 关键：为伪点云创建单独的体素生成器
@@ -299,7 +306,8 @@ class DataProcessor(object):
         if data_dict is None:
             return partial(self.grid_sample_points_pseudo, config=config)
 
-        if 'points_pseudo' not in data_dict:
+        # if 'points_pseudo' not in data_dict:
+        if 'points_pseudo' not in data_dict or data_dict['points_pseudo'] is None:
             return data_dict
         
         max_distance = config.MAX_DISTANCE
